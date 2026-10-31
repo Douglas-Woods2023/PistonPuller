@@ -3,7 +3,8 @@
 [English](README.md) | [简体中文](README_zh.md)
 
 [![Language](https://img.shields.io/badge/Language-C-blue.svg)](#)
-[![Platform](https://img.shields.io/badge/Platform-Linux-orange.svg)](#)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-orange.svg)](#)
+[![Version](https://img.shields.io/badge/Version-0.2.0-brightgreen.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **PistonPuller** is a minimalist, hardcore CLI downloader for Minecraft Java Edition (Vanilla). 
@@ -21,64 +22,84 @@ Furthermore, PistonPuller is designed as a **"Geek Filter."** The CLI interface 
 ## Features
 
 - 🚀 **Pure & Lightweight**: Written in C. No Node.js, no Python, no Java runtime required to run the downloader.
+- 🌍 **Cross-Platform**: Native support for Linux and Windows. Windows builds are completely standalone `.exe` files with zero external dependencies.
 - 🧠 **Smart Sync**: Automatically checks local file sizes. Skips existing complete files and re-downloads corrupted/incomplete ones.
 - 🔍 **Dynamic Versioning**: Supports fuzzy queries like `latest`, `snapshot`, and full version listings.
 - 🛡️ **Asset Control**: Use the `--no-assets` flag to skip downloading thousands of tiny resource files (let launchers like HMCL or PrismLauncher fill them in later).
-- 📦 **Launcher Compatible**: Files are downloaded to standard directory structures (`~/.minecraft`), fully recognizable by HMCL, MultiMC, PrismLauncher, etc.
+- 📦 **Launcher Compatible**: Files are downloaded to standard directory structures (`~/.minecraft` or `%USERPROFILE%\.minecraft`), fully recognizable by HMCL, MultiMC, PrismLauncher, etc.
 
-## Prerequisites
+## Prerequisites & Build
 
-- **OS**: GNU/Linux (Windows support planned for v0.2.0)
-- **Compiler**: `gcc`
-- **Libraries**: `libcurl` and `cJSON`.
-
-Install dependencies on Debian/Ubuntu/Kali:
+### 🐧 Linux
+Install dependencies (Debian/Ubuntu):
 ```bash
 sudo apt update
 sudo apt install libcurl4-openssl-dev
 ```
-*(Note: `cJSON.c` and `cJSON.h` are included in this repository. No need to install them system-wide.)*
 
-## Build
-
-Clone the repository and compile the source code:
-
+Clone and compile:
 ```bash
 git clone https://github.com/Douglas-Woods2023/PistonPuller.git
 cd PistonPuller
 gcc main.c cJSON.c -o pistonpuller -lm -lcurl
 ```
 
+### 🪟 Windows (MSYS2)
+It is highly recommended to use [MSYS2](https://www.msys2.org/) to compile this project on Windows. 
+
+Open the MSYS2 MINGW64 terminal and install the toolchain and dependencies:
+```bash
+pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-curl
+```
+
+Clone and compile (Dynamic linking):
+```bash
+git clone https://github.com/Douglas-Woods2023/PistonPuller.git
+cd PistonPuller
+gcc main.c cJSON.c -o pistonpuller.exe -lm -lcurl -lpthread
+```
+
+**How to run on other PCs:**
+Because `libcurl` on Windows relies on dynamic libraries, you need to gather the required `.dll` files to distribute the `.exe`.
+You can use `ldd pistonpuller.exe` in MSYS2 to see the dependencies, and copy them (like `libcurl-x64.dll`, `libcrypto-3-x64.dll`) into the same directory as `pistonpuller.exe`. Then zip them together for distribution.
+
 ## Usage
 
+### Linux
 ```bash
 ./pistonpuller [version] [install_dir] [--no-assets]
 ```
 
+### Windows (CMD / PowerShell)
+```cmd
+pistonpuller.exe [version] [install_dir] [--no-assets]
+```
+
 ### Examples
 
-**1. Download the latest release version to `~/.minecraft`:**
+**1. Download the latest release version to the default directory:**
 ```bash
+# Linux
 ./pistonpuller latest
+# Windows
+pistonpuller.exe latest
 ```
 
 **2. Download a specific version (e.g., 26.3) and skip assets:**
 ```bash
+# Linux
 ./pistonpuller 26.3 --no-assets
+# Windows
+pistonpuller.exe 26.3 --no-assets
 ```
 
-**3. Download to a custom directory:**
+**3. List all available game versions (Piping is your friend):**
 ```bash
-./pistonpuller 1.12.2 /path/to/my/custom/minecraft
-```
-
-**4. List all available game versions (Piping is your friend):**
-```bash
-# List all versions
-./pistonpuller list
-
-# Find recent releases (Linux/macOS)
+# Linux (using grep)
 ./pistonpuller list | grep release | head -n 10
+
+# Windows PowerShell (using Select-String)
+.\pistonpuller.exe list | Select-String "release" | Select-Object -First 10
 ```
 
 ## How It Works

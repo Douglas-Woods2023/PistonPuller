@@ -5,7 +5,24 @@
 #include <curl/curl.h>
 #include "cJSON.h"
 
-#define VERSION "0.1.0"
+// --- 跨平台兼容处理 ---
+#ifdef _WIN32
+    #include <direct.h>
+    #define MKDIR(path) _mkdir(path)
+#else
+    #include <unistd.h>
+    #define MKDIR(path) mkdir(path, 0777)
+#endif
+
+#ifdef _WIN32
+    #include <windows.h>
+#endif
+
+#ifdef _WIN32
+    #define VERSION "0.2.0 on Win32"
+#else
+    #define VERSION "0.2.0 on Unix"
+#endif
 
 // --- 打印极客 Banner ---
 void print_banner() {
@@ -25,6 +42,31 @@ void print_banner() {
     printf("  说明 (Description): 这是一个极简的 Minecraft 原版下载器，支持 HMCL、MultiMC 等启动器。\n");
     printf("  (This is a minimalist Minecraft vanilla downloader, supporting HMCL, MultiMC, etc.)\n");
     printf("====================================================\n\n");
+}
+
+// --- 跨平台递归创建目录 ---
+void mkdir_p(const char *path) {
+    char tmp[1024];
+    char *p = NULL;
+    size_t len;
+
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    len = strlen(tmp);
+    
+    // 去掉结尾的斜杠
+    if (tmp[len - 1] == '/' || tmp[len - 1] == '\\') {
+        tmp[len - 1] = 0;
+    }
+
+    // 逐级创建目录
+    for (p = tmp + 1; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            *p = 0;
+            MKDIR(tmp);
+            *p = '/'; // 统一替换成正斜杠，Windows 底层 API 也认正斜杠
+        }
+    }
+    MKDIR(tmp);
 }
 
 // --- libcurl 进度条回调 ---
@@ -54,6 +96,7 @@ int download_with_progress(const char* url, const char* filename, int show_progr
     }
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_CAINFO, "cacert.pem");
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
@@ -111,7 +154,6 @@ void download_libraries(cJSON *root, const char *mc_dir) {
     int array_size = cJSON_GetArraySize(libraries);
     printf(">>> 准备处理 %d 个依赖库 (Preparing libraries)...\n", array_size);
 
-    char cmd[1024];
     char save_path[1024];
     int downloaded_count = 0;
     int skipped_count = 0;
@@ -140,8 +182,7 @@ void download_libraries(cJSON *root, const char *mc_dir) {
                 char *last_slash = strrchr(dir_path, '/');
                 if (last_slash) {
                     *last_slash = '\0';
-                    sprintf(cmd, "mkdir -p %s", dir_path);
-                    system(cmd);
+                    mkdir_p(dir_path);
                 }
 
                 // 保留你原版的下载提示
@@ -168,14 +209,14 @@ void download_assets(cJSON *root, const char *mc_dir) {
     cJSON *url_obj = cJSON_GetObjectItem(assetIndex, "url");
     if (!id_obj || !url_obj) return;
 
-    char cmd[1024];
     char index_path[1024];
     char index_url[512];
     
     strncpy(index_url, url_obj->valuestring, sizeof(index_url) - 1);
 
-    sprintf(cmd, "mkdir -p %s/assets/indexes", mc_dir);
-    system(cmd);
+    char indexes_dir[1024];
+    sprintf(indexes_dir, "%s/assets/indexes", mc_dir);
+    mkdir_p(indexes_dir);
 
     sprintf(index_path, "%s/assets/indexes/%s.json", mc_dir, id_obj->valuestring);
     
@@ -222,8 +263,7 @@ void download_assets(cJSON *root, const char *mc_dir) {
                 char *last_slash = strrchr(dir_path, '/');
                 if (last_slash) {
                     *last_slash = '\0';
-                    sprintf(cmd, "mkdir -p %s", dir_path);
-                    system(cmd);
+                    mkdir_p(dir_path); 
                 }
 
                 char resource_url[512];
@@ -241,18 +281,47 @@ void download_assets(cJSON *root, const char *mc_dir) {
     cJSON_Delete(index_root);
 }
 
+// --- 打印帮助信息 ---
+void print_help(const char* prog_name) {
+    printf("用法 (Usage):\n");
+    printf("  %s [版本号] [安装路径] [选项]\n\n", prog_name);
+    printf("内置指令 (Commands):\n");
+    printf("  latest          下载最新的正式版 (Download latest release)\n");
+    printf("  snapshot        下载最新的快照版 (Download latest snapshot)\n");
+    printf("  list [类型]     列出所有版本，可选类型 release/snapshot (List versions)\n\n");
+    printf("选项 (Options):\n");
+    printf("  --no-assets     跳过几千个资源文件的下载，交由启动器补全 (Skip assets)\n");
+    printf("  -h, --help      显示此帮助信息 (Show this help message)\n");
+    printf("  -v, --version   显示当前版本号 (Show version info)\n\n");
+    printf("示例 (Examples):\n");
+    printf("  %s latest\n", prog_name);
+    printf("  %s 26.3 --no-assets\n", prog_name);
+    printf("  %s 1.12.2 /path/to/minecraft\n", prog_name);
+    printf("  %s list release\n\n", prog_name);
+}
+
 int main(int argc, char *argv[]) {
+    #ifdef _WIN32
+        SetConsoleOutputCP(CP_UTF8); // 强制控制台使用 UTF-8 输出
+    #endif
+
     print_banner();
 
-    char cmd[1024];
     const char* target_version = "26.3"; 
     int skip_assets = 0; 
     char list_filter[32] = {0}; // 用于 list 过滤
     
-    char mc_dir[1024];
-    char* home = getenv("HOME");
+        char mc_dir[1024];
+    char* home = NULL;
+    
+    #ifdef _WIN32
+        home = getenv("USERPROFILE"); // Windows
+    #else
+        home = getenv("HOME");        // Linux/macOS
+    #endif
+
     if (!home) {
-        printf("[ERR] 找不到 HOME 环境变量 (HOME not found)\n");
+        printf("[ERR] 找不到用户主目录 (Cannot find home directory)\n");
         return 1;
     }
     sprintf(mc_dir, "%s/.minecraft", home); 
@@ -260,6 +329,14 @@ int main(int argc, char *argv[]) {
     // 统一的参数遍历
     int positional_count = 0; 
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_help(argv[0]);
+            return 0;
+        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            printf("PistonPuller v%s\n", VERSION);
+            return 0;
+        }
+        
         if (strcmp(argv[i], "--no-assets") == 0) {
             skip_assets = 1;
         } else if (argv[i][0] != '-') { 
@@ -330,7 +407,7 @@ int main(int argc, char *argv[]) {
     }
 
     // 2. 拦截 latest / snapshot 指令
-    // ⚠️ 关键防雷：用一个安全的数组来接住版本号，防止 cJSON 释放后变成野指针
+    // 关键防雷：用一个安全的数组来接住版本号，防止 cJSON 释放后变成野指针
     char resolved_version[64] = {0};
     if (strcmp(target_version, "latest") == 0 || strcmp(target_version, "snapshot") == 0) {
         cJSON* latest_obj = cJSON_GetObjectItem(manifest_root, "latest");
@@ -376,8 +453,9 @@ int main(int argc, char *argv[]) {
     // ==========================================
     printf(">>> [3/4] 正在获取 %s 的详细配置文件 (Fetching version config)...\n", target_version);
     
-    sprintf(cmd, "mkdir -p %s/versions/%s", mc_dir, target_version);
-    system(cmd);
+    char version_dir[1024];
+    sprintf(version_dir, "%s/versions/%s", mc_dir, target_version);
+    mkdir_p(version_dir); 
 
     char version_json_file[1024];
     sprintf(version_json_file, "%s/versions/%s/%s.json", mc_dir, target_version, target_version);
