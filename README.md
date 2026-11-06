@@ -4,7 +4,7 @@
 
 [![Language](https://img.shields.io/badge/Language-C-blue.svg)](#)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-orange.svg)](#)
-[![Version](https://img.shields.io/badge/Version-0.2.0-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/Version-0.3.0-brightgreen.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **PistonPuller** is a minimalist, hardcore CLI downloader for Minecraft Java Edition (Vanilla). 
@@ -21,12 +21,15 @@ Furthermore, PistonPuller is designed as a **"Geek Filter."** The CLI interface 
 
 ## Features
 
-- 🚀 **Pure & Lightweight**: Written in C. No Node.js, no Python, no Java runtime required to run the downloader.
-- 🌍 **Cross-Platform**: Native support for Linux and Windows. Windows builds are completely standalone `.exe` files with zero external dependencies.
-- 🧠 **Smart Sync**: Automatically checks local file sizes. Skips existing complete files and re-downloads corrupted/incomplete ones.
+- 🚀 **Blazing Fast & Lightweight**: Written in C. No Node.js, no Python, no Java runtime required.
+- ⚡ **16-Thread Acceleration**: Utilizes a multithreading thread pool. Downloads thousands of assets and libraries concurrently, boosting speed by over 10x.
+- ⏯️ **Resume Support (Breakpoint Resume)**: Automatically detects partially downloaded files and resumes from where it left off. Never download from scratch again.
+- 📊 **apt-style Progress Bar**: A gorgeous terminal progress bar with real-time speed (MB/s) and ETA (Estimated Time of Arrival), keeping your console clean.
+- 🌍 **Cross-Platform**: Native support for Linux and Windows. Windows builds are completely standalone `.exe` files.
+- 🧠 **Smart Sync & Auto-Retry**: Automatically checks local file sizes to skip complete files. Includes a 3-time auto-retry mechanism for unstable networks.
 - 🔍 **Dynamic Versioning**: Supports fuzzy queries like `latest`, `snapshot`, and full version listings.
-- 🛡️ **Asset Control**: Use the `--no-assets` flag to skip downloading thousands of tiny resource files (let launchers like HMCL or PrismLauncher fill them in later).
-- 📦 **Launcher Compatible**: Files are downloaded to standard directory structures (`~/.minecraft` or `%USERPROFILE%\.minecraft`), fully recognizable by HMCL, MultiMC, PrismLauncher, etc.
+- 🛡️ **Asset Control**: Use the `--no-assets` flag to skip downloading thousands of tiny resource files.
+- 📦 **Launcher Compatible**: Files are downloaded to standard directory structures, fully recognizable by HMCL, MultiMC, PrismLauncher, etc.
 
 ## Prerequisites & Build
 

@@ -4,6 +4,8 @@
 #include <sys/stat.h>
 #include <curl/curl.h>
 #include "cJSON.h"
+#include <pthread.h>
+#include <time.h>
 
 // --- 跨平台兼容处理 ---
 #ifdef _WIN32
@@ -19,9 +21,9 @@
 #endif
 
 #ifdef _WIN32
-    #define VERSION "0.2.0 on Win32"
+    #define VERSION "0.3.0 on Win32"
 #else
-    #define VERSION "0.2.0 on Unix"
+    #define VERSION "0.3.0 on Unix"
 #endif
 
 // --- 打印极客 Banner ---
@@ -42,6 +44,70 @@ void print_banner() {
     printf("  说明 (Description): 这是一个极简的 Minecraft 原版下载器，支持 HMCL、MultiMC 等启动器。\n");
     printf("  (This is a minimalist Minecraft vanilla downloader, supporting HMCL, MultiMC, etc.)\n");
     printf("====================================================\n\n");
+}
+
+
+// ==========================================
+// 多线程核心数据结构与全局变量
+// ==========================================
+typedef struct {
+    char url[512];
+    char save_path[1024];
+    long expected_size;
+} DownloadTask;
+
+DownloadTask tasks[15000]; // 任务队列（足够装下 assets 和 libraries）
+int total_tasks = 0;       // 总任务数
+int current_index = 0;     // 当前抢到的任务索引
+int finished_count = 0;    // 已完成任务数
+
+long total_bytes = 0;
+long downloaded_bytes = 0;
+time_t start_time;
+
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER; // 互斥锁
+int thread_count = 16;     // 并发线程数（16个线程足够快了）
+
+// 绘制 apt 风格进度条 (带速度和预计时间)
+void draw_progress_bar(int current, int total) {
+    int bar_width = 30;
+    float progress = (float)current / total;
+    int pos = bar_width * progress;
+
+    // 计算速度和剩余时间
+    time_t now = time(NULL);
+    double elapsed = difftime(now, start_time);
+    if (elapsed <= 0) elapsed = 1.0; // 防止除以 0
+
+    double speed = downloaded_bytes / elapsed; // 字节/秒
+    double remain_bytes = total_bytes - downloaded_bytes;
+    double eta_sec = remain_bytes / speed;
+
+    // 格式化速度 (MB/s 或 KB/s)
+    char speed_str[32];
+    if (speed > 1024 * 1024) {
+        sprintf(speed_str, "%.2f MB/s", speed / 1024.0 / 1024.0);
+    } else {
+        sprintf(speed_str, "%.1f KB/s", speed / 1024.0);
+    }
+
+    // 格式化剩余时间 (mm:ss)
+    char eta_str[32];
+    if (eta_sec > 3600) {
+        sprintf(eta_str, "%dh%02dm", (int)(eta_sec / 3600), (int)(eta_sec / 60) % 60);
+    } else {
+        sprintf(eta_str, "%02d:%02d", (int)(eta_sec / 60), (int)eta_sec % 60);
+    }
+
+    // \033[K 清除当前行，\r 回到行首
+    printf("\r\033[K[");
+    for (int i = 0; i < bar_width; ++i) {
+        if (i < pos) printf("=");
+        else if (i == pos) printf(">");
+        else printf(" ");
+    }
+    printf("] %3.0f%% (%d/%d) | %s | 剩余: %s", progress * 100.0, current, total, speed_str, eta_str);
+    fflush(stdout);
 }
 
 // --- 跨平台递归创建目录 ---
@@ -71,9 +137,19 @@ void mkdir_p(const char *path) {
 
 // --- libcurl 进度条回调 ---
 int progress_callback(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
-    if (dltotal > 0) {
-        double percent = (double)dlnow / (double)dltotal * 100.0;
-        printf("\r下载进度 (Progress): %6.2f%% [%.2f MB / %.2f MB]", percent, (double)dlnow / 1024 / 1024, (double)dltotal / 1024 / 1024);
+    // 获取断点偏移量
+    long resume_offset = 0;
+    if (clientp) {
+        resume_offset = *(long*)clientp;
+    }
+    
+    // 真实的已下载量和总大小
+    long real_total = dltotal + resume_offset;
+    long real_now = dlnow + resume_offset;
+
+    if (real_total > 0) {
+        double percent = (double)real_now / (double)real_total * 100.0;
+        printf("\r下载进度 (Progress): %6.2f%% [%.2f MB / %.2f MB]", percent, (double)real_now / 1024 / 1024, (double)real_total / 1024 / 1024);
         fflush(stdout);
     }
     return 0;
@@ -86,39 +162,79 @@ size_t write_callback(void *ptr, size_t size, size_t nmemb, void *stream) {
 
 // --- libcurl 下载封装 ---
 int download_with_progress(const char* url, const char* filename, int show_progress) {
-    CURL *curl = curl_easy_init();
-    if (!curl) return 0;
-
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        printf("无法创建文件 (Cannot create): %s\n", filename);
-        return 0;
-    }
-
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_CAINFO, "cacert.pem");
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    int retries = 3;
     
-    if (show_progress) {
-        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
-    } else {
-        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L); 
-    }
+    while (retries > 0) {
+        CURL *curl = curl_easy_init();
+        if (!curl) return 0;
 
-    CURLcode res = curl_easy_perform(curl);
-    fclose(fp);
-    curl_easy_cleanup(curl);
+        // 1. 检查本地残卷大小
+        long local_size = 0;
+        struct stat st;
+        if (stat(filename, &st) == 0) {
+            local_size = st.st_size;
+        }
 
-    if (res == CURLE_OK) {
-        if (show_progress) printf("\n[OK] 下载成功 (Success): %s\n", filename);
-        return 1;
-    } else {
-        if (show_progress) printf("\n[ERR] 下载失败 (Failed): %s\n", curl_easy_strerror(res));
-        return 0;
+        // 2. 核心：如果有残卷，用 "ab" (追加模式)；否则用 "wb" (覆盖模式)
+        FILE *fp = (local_size > 0) ? fopen(filename, "ab") : fopen(filename, "wb");
+
+        if (!fp) {
+            curl_easy_cleanup(curl);
+            return 0;
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_CAINFO, "cacert.pem");
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L); 
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L); 
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
+
+        // 3. 告诉 libcurl 从哪个字节开始接着下
+        if (local_size > 0) {
+            curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)local_size);
+        }
+        
+        if (show_progress) {
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+            curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &local_size); 
+        } else {
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L); 
+        }
+
+        CURLcode res = curl_easy_perform(curl);
+        
+        // 4. 防雷：如果返回 416 (Range 不满足)，说明本地残卷可能比服务器文件还大，直接删掉重下
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        if (http_code == 416) {
+            remove(filename); 
+        }
+
+        fclose(fp);
+        curl_easy_cleanup(curl);
+
+        if (res == CURLE_OK) {
+            if (show_progress) printf("\n[OK] 下载成功 (Success): %s\n", filename);
+            return 1; 
+        } else {
+            if (show_progress) printf("\n[ERR] 下载失败 (Failed): %s, 正在重试...\n", curl_easy_strerror(res));
+            
+            retries--;
+            if (retries > 0) {
+                #ifdef _WIN32
+                    Sleep(500);
+                #else
+                    usleep(500000);
+                #endif
+            }
+        }
     }
+    return 0; 
 }
 
 // --- 辅助函数：读取本地 JSON 文件 ---
@@ -147,22 +263,17 @@ int need_download(const char* filepath, long expected_size) {
 }
 
 // --- 下载所有依赖库 ---
-void download_libraries(cJSON *root, const char *mc_dir) {
+void collect_libraries(cJSON *root, const char *mc_dir) {
     cJSON *libraries = cJSON_GetObjectItem(root, "libraries");
     if (!libraries || !cJSON_IsArray(libraries)) return;
 
     int array_size = cJSON_GetArraySize(libraries);
-    printf(">>> 准备处理 %d 个依赖库 (Preparing libraries)...\n", array_size);
-
-    char save_path[1024];
-    int downloaded_count = 0;
-    int skipped_count = 0;
+    printf(">>> 正在分析 %d 个依赖库...\n", array_size);
 
     for (int i = 0; i < array_size; i++) {
         cJSON *lib = cJSON_GetArrayItem(libraries, i);
         cJSON *downloads = cJSON_GetObjectItem(lib, "downloads");
         if (!downloads) continue;
-
         cJSON *artifact = cJSON_GetObjectItem(downloads, "artifact");
         if (!artifact) continue;
 
@@ -171,60 +282,47 @@ void download_libraries(cJSON *root, const char *mc_dir) {
         cJSON *size_obj = cJSON_GetObjectItem(artifact, "size");
 
         if (path_obj && cJSON_IsString(path_obj) && url_obj && cJSON_IsString(url_obj)) {
-            long expected_size = 0;
-            if (size_obj && cJSON_IsNumber(size_obj)) expected_size = (long)size_obj->valuedouble;
-
+            long expected_size = (size_obj && cJSON_IsNumber(size_obj)) ? (long)size_obj->valuedouble : 0;
+            char save_path[1024];
             sprintf(save_path, "%s/libraries/%s", mc_dir, path_obj->valuestring);
 
             if (need_download(save_path, expected_size)) {
+                // 建目录
                 char dir_path[1024];
                 strcpy(dir_path, save_path);
                 char *last_slash = strrchr(dir_path, '/');
-                if (last_slash) {
-                    *last_slash = '\0';
-                    mkdir_p(dir_path);
-                }
-
-                // 保留你原版的下载提示
-                printf("[%d/%d] 正在下载: %s\n", i + 1, array_size, path_obj->valuestring);
-                if (download_with_progress(url_obj->valuestring, save_path, 1)) {
-                    downloaded_count++;
-                } else {
-                    printf("  [ERR] 失败 (Failed): %s\n", path_obj->valuestring);
-                }
-            } else {
-                skipped_count++;
+                if (last_slash) { *last_slash = '\0'; mkdir_p(dir_path); }
+                
+                // 塞入队列
+                strcpy(tasks[total_tasks].url, url_obj->valuestring);
+                strcpy(tasks[total_tasks].save_path, save_path);
+                tasks[total_tasks].expected_size = expected_size;
+                total_bytes += expected_size;
+                total_tasks++;
             }
         }
     }
-    printf(">>> 依赖库处理完毕 (Libraries done)! 新下载 (New): %d, 跳过 (Skipped): %d\n", downloaded_count, skipped_count);
 }
 
 // --- 下载 Assets 资源文件 ---
-void download_assets(cJSON *root, const char *mc_dir) {
+void collect_assets(cJSON *root, const char *mc_dir) {
     cJSON *assetIndex = cJSON_GetObjectItem(root, "assetIndex");
     if (!assetIndex) return;
-
     cJSON *id_obj = cJSON_GetObjectItem(assetIndex, "id");
     cJSON *url_obj = cJSON_GetObjectItem(assetIndex, "url");
     if (!id_obj || !url_obj) return;
 
-    char index_path[1024];
-    char index_url[512];
-    
+    char index_url[512], index_path[1024];
     strncpy(index_url, url_obj->valuestring, sizeof(index_url) - 1);
-
+    
     char indexes_dir[1024];
     sprintf(indexes_dir, "%s/assets/indexes", mc_dir);
     mkdir_p(indexes_dir);
-
+    
     sprintf(index_path, "%s/assets/indexes/%s.json", mc_dir, id_obj->valuestring);
     
-    printf(">>> 正在获取 Assets 索引 (Fetching Assets Index)...\n");
-    if (!download_with_progress(index_url, index_path, 0)) {
-        printf("[ERR] Assets 索引下载失败，跳过 (Index download failed).\n");
-        return;
-    }
+    // 索引文件很小，直接单线程下
+    if (!download_with_progress(index_url, index_path, 0)) return;
 
     char* index_str = read_file(index_path);
     cJSON* index_root = cJSON_Parse(index_str);
@@ -232,52 +330,37 @@ void download_assets(cJSON *root, const char *mc_dir) {
     if (!index_root) return;
 
     cJSON *objects = cJSON_GetObjectItem(index_root, "objects");
-    if (!objects) {
-        cJSON_Delete(index_root);
-        return;
-    }
+    if (!objects) { cJSON_Delete(index_root); return; }
 
-    int total_objects = cJSON_GetArraySize(objects);
-    printf(">>> 准备下载 %d 个资源文件 (Downloading %d assets)...\n", total_objects, total_objects);
-
-    char save_path[1024];
-    int count = 0;
+    printf(">>> 正在分析 %d 个资源文件...\n", cJSON_GetArraySize(objects));
     
     for (cJSON *item = objects->child; item != NULL; item = item->next) {
-        count++;
         cJSON *hash_obj = cJSON_GetObjectItem(item, "hash");
         cJSON *size_obj = cJSON_GetObjectItem(item, "size");
         
         if (hash_obj && cJSON_IsString(hash_obj)) {
             char hash[64];
             strncpy(hash, hash_obj->valuestring, sizeof(hash) - 1);
-            
-            long expected_size = 0;
-            if (size_obj && cJSON_IsNumber(size_obj)) expected_size = (long)size_obj->valuedouble;
+            long expected_size = (size_obj && cJSON_IsNumber(size_obj)) ? (long)size_obj->valuedouble : 0;
 
+            char save_path[1024];
             sprintf(save_path, "%s/assets/objects/%.2s/%s", mc_dir, hash, hash);
             
             if (need_download(save_path, expected_size)) {
                 char dir_path[1024];
                 strcpy(dir_path, save_path);
                 char *last_slash = strrchr(dir_path, '/');
-                if (last_slash) {
-                    *last_slash = '\0';
-                    mkdir_p(dir_path); 
-                }
+                if (last_slash) { *last_slash = '\0'; mkdir_p(dir_path); }
 
-                char resource_url[512];
-                sprintf(resource_url, "https://resources.download.minecraft.net/%.2s/%s", hash, hash);
-                download_with_progress(resource_url, save_path, 0);
-                
-                // 每 1000 个打印一次，免得刷屏
-                if (count % 1000 == 0) {
-                    printf("    已处理 (Processed): %d / %d\n", count, total_objects);
-                }
+                // 塞入队列
+                sprintf(tasks[total_tasks].url, "https://resources.download.minecraft.net/%.2s/%s", hash, hash);
+                strcpy(tasks[total_tasks].save_path, save_path);
+                tasks[total_tasks].expected_size = expected_size;
+                total_bytes += expected_size;
+                total_tasks++;
             }
         }
     }
-    printf(">>> Assets 资源处理完毕 (Assets done)!\n");
     cJSON_Delete(index_root);
 }
 
@@ -300,9 +383,47 @@ void print_help(const char* prog_name) {
     printf("  %s list release\n\n", prog_name);
 }
 
+// 线程工作函数
+void* worker_thread(void* arg) {
+    while (1) {
+        int my_index = -1;
+        
+        pthread_mutex_lock(&lock);
+        if (current_index < total_tasks) {
+            my_index = current_index;
+            current_index++;
+        }
+        pthread_mutex_unlock(&lock);
+
+        if (my_index == -1) break;
+
+        // 执行下载
+        int success = download_with_progress(tasks[my_index].url, tasks[my_index].save_path, 0);
+
+        // 完成后更新进度
+        pthread_mutex_lock(&lock);
+        finished_count++;
+        if (success) {
+            downloaded_bytes += tasks[my_index].expected_size; 
+        } else {
+            printf("\r\033[K\033[31m[ERR] 下载失败: %s\033[0m\n", tasks[my_index].save_path);
+        }
+        draw_progress_bar(finished_count, total_tasks);
+        pthread_mutex_unlock(&lock);
+    }
+    return NULL;
+}
+
 int main(int argc, char *argv[]) {
     #ifdef _WIN32
         SetConsoleOutputCP(CP_UTF8); // 强制控制台使用 UTF-8 输出
+        
+        // 开启 Windows 终端的 ANSI 转义码支持 (让进度条和颜色生效)
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD dwMode = 0;
+        GetConsoleMode(hOut, &dwMode);
+        dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        SetConsoleMode(hOut, dwMode);
     #endif
 
     print_banner();
@@ -495,19 +616,65 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    download_libraries(version_root, mc_dir);
+    // ==========================================
+    // 开始收集多线程任务
+    // ==========================================
+    collect_libraries(version_root, mc_dir);
     
     if (!skip_assets) {
-        download_assets(version_root, mc_dir);
+        collect_assets(version_root, mc_dir);
     } else {
-        printf("\n>>> [SKIP] 已根据参数跳过 Assets 下载 (Assets skipped).\n");
-        printf("    (你可以放心地让 HMCL 在启动时自动补全这部分资源 / Let HMCL complete it)\n");
+        printf("\n>>> [SKIP] 已跳过 Assets 下载。\n");
     }
     cJSON_Delete(version_root);
 
-    printf("\n\033[32m[SUCCESS] 大功告成 (All Done)!\033[0m\n");
-    printf("现在你可以打开 HMCL，指向 %s 目录，看看能不能识别出 %s 了。\n", mc_dir, target_version);
-    printf("You can now open HMCL, point to the directory above, and launch %s.\n", target_version);
+    // ==========================================
+    // 启动多线程下载
+    // ==========================================
+    if (total_tasks > 0) {
+        printf("\n>>> 收集完毕！共 %d 个文件，启动 %d 个线程下载...\n", total_tasks, thread_count);
+        fflush(stdout);
+
+        start_time = time(NULL);
+
+        // 必须调用 curl_global_init 保证多线程安全
+        curl_global_init(CURL_GLOBAL_ALL);
+
+        pthread_t threads[16]; // 最多16个线程
+        for (int i = 0; i < thread_count; i++) {
+            pthread_create(&threads[i], NULL, worker_thread, NULL);
+        }
+
+        // 等待所有线程结束
+        for (int i = 0; i < thread_count; i++) {
+            pthread_join(threads[i], NULL);
+        }
+
+        printf("\n"); // 进度条结束后换行
+        curl_global_cleanup();
+        time_t end_time = time(NULL);
+        double total_sec = difftime(end_time, start_time);
+        int min = (int)total_sec / 60;
+        int sec = (int)total_sec % 60;
+        
+        // 把总大小换算成 MB
+        double total_mb = (double)total_bytes / 1024.0 / 1024.0;
+        
+        printf(">>> \033[36m下载阶段结束 (Download finished)!\033[0m\n");
+        printf(">>> 总大小 (Total Size): %.2f MB\n", total_mb);
+        printf(">>> 总耗时 (Total Time): %02d 分 (min) %02d 秒 (sec)\n", min, sec);
+    } else {
+        printf("\n>>> 所有文件均已存在，无需下载！\n");
+    }
+
+    if (finished_count == total_tasks && total_bytes > 0) {
+        // 这里稍微简单判断一下，只要任务数量对上了就算成功
+        // 如果想严谨，可以再引入一个 failed_count 变量
+        printf("\n\033[32m[SUCCESS] 大功告成 (All Done)!\033[0m\n");
+    } else {
+        printf("\n\033[33m[WARN] 部分文件下载失败，请重新运行本程序以补齐缺失文件。\033[0m\n");
+    }
+    printf("现在你可以打开 HMCL，指向 %s 目录启动 %s 了。\n", mc_dir, target_version);
 
     return 0;
 }

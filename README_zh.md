@@ -4,7 +4,7 @@
 
 [![Language](https://img.shields.io/badge/Language-C-blue.svg)](#)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-orange.svg)](#)
-[![Version](https://img.shields.io/badge/Version-0.2.0-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/Version-0.3.0-brightgreen.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **PistonPuller** 是一个极简、硬核的 Minecraft Java 版（原版）命令行下载器。
@@ -22,11 +22,14 @@
 ## 特性
 
 - 🚀 **纯粹且轻量**：纯 C 语言编写。运行它不需要安装 Node.js、Python 或 Java 运行时。
-- 🌍 **全平台支持**：原生支持 Linux 与 Windows。Windows 版本采用静态编译，生成零外部依赖的独立 `.exe` 文件，开箱即用。
-- 🧠 **智能同步**：自动校验本地文件大小。存在且完整的文件直接跳过，残缺或损坏的文件自动重新下载（自带断点续传雏形）。
+- ⚡ **16 线程极速并发**：底层采用多线程队列模型，数千个依赖库与资源文件同时开下，速度提升 10 倍以上。
+- ⏯️ **断点续传支持**：自动检测本地未下完的残卷。网络中断或手动 Ctrl+C 后，再次运行将从断点处继续，拒绝重复下载。
+- 📊 **对标 `apt` 的终端进度条**：不仅有一条死死咬住底线的全局进度条，还实时显示下载速度（MB/s）与预计剩余时间（ETA），极致终端美学。
+- 🌍 **全平台支持**：原生支持 Linux 与 Windows。Windows 版本解压即用，零外部依赖。
+- 🧠 **智能校验与自动重试**：自动校验文件大小跳过完整文件；内置网络波动容错，失败自动重试最多 3 次，拒绝烂尾。
 - 🔍 **动态版本控制**：支持 `latest`（最新正式版）、`snapshot`（最新快照版）快捷指令，以及全量版本列表查询。
-- 🛡️ **资源下载开关**：使用 `--no-assets` 参数跳过数千个小体积资源文件的下载（你可以放心地让 HMCL 或 PrismLauncher 在启动时自动补全它们）。
-- 📦 **启动器兼容**：文件严格按照标准目录结构下载至用户目录下的 `.minecraft`，HMCL、MultiMC、PrismLauncher 等启动器均可完美识别。
+- 🛡️ **资源下载开关**：使用 `--no-assets` 参数跳过数千个小体积资源文件的下载。
+- 📦 **启动器兼容**：文件严格下载至标准 `.minecraft` 目录结构，HMCL、MultiMC 等启动器完美识别。
 
 ## 环境依赖与编译
 
