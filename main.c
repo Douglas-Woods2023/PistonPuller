@@ -168,14 +168,12 @@ int download_with_progress(const char* url, const char* filename, int show_progr
         CURL *curl = curl_easy_init();
         if (!curl) return 0;
 
-        // 1. 检查本地残卷大小
         long local_size = 0;
         struct stat st;
         if (stat(filename, &st) == 0) {
             local_size = st.st_size;
         }
 
-        // 2. 核心：如果有残卷，用 "ab" (追加模式)；否则用 "wb" (覆盖模式)
         FILE *fp = (local_size > 0) ? fopen(filename, "ab") : fopen(filename, "wb");
 
         if (!fp) {
@@ -193,7 +191,6 @@ int download_with_progress(const char* url, const char* filename, int show_progr
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 10L); 
         curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
 
-        // 3. 告诉 libcurl 从哪个字节开始接着下
         if (local_size > 0) {
             curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, (curl_off_t)local_size);
         }
@@ -201,24 +198,22 @@ int download_with_progress(const char* url, const char* filename, int show_progr
         if (show_progress) {
             curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
             curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress_callback);
-            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &local_size); 
+            curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &local_size); // 把断点偏移传给进度条
         } else {
             curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L); 
         }
 
         CURLcode res = curl_easy_perform(curl);
         
-        // 4. 防雷：如果返回 416 (Range 不满足)，说明本地残卷可能比服务器文件还大，直接删掉重下
+        // 获取 HTTP 状态码
         long http_code = 0;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-        if (http_code == 416) {
-            remove(filename); 
-        }
-
+        
         fclose(fp);
         curl_easy_cleanup(curl);
 
-        if (res == CURLE_OK) {
+        // 核心修复：如果是 416，说明本地文件已经完整了，直接当作成功
+        if (res == CURLE_OK || http_code == 416) {
             if (show_progress) printf("\n[OK] 下载成功 (Success): %s\n", filename);
             return 1; 
         } else {
@@ -484,11 +479,17 @@ int main(int argc, char *argv[]) {
     if (!download_with_progress(manifest_url, "version_manifest_v2.json", 1)) return 1;
 
     char* manifest_str = read_file("version_manifest_v2.json");
-    if (!manifest_str) return 1;
+    if (!manifest_str) {
+        printf("[ERR] 无法读取本地清单文件 (Failed to read manifest)\n");
+        return 1;
+    }
 
     cJSON* manifest_root = cJSON_Parse(manifest_str);
     free(manifest_str);
-    if (!manifest_root) return 1;
+    if (!manifest_root) {
+        printf("[ERR] 无法解析清单文件 (Failed to parse manifest)\n");
+        return 1;
+    }
 
     // ==========================================
     // 第二步：拦截检索指令 & 解析总清单
