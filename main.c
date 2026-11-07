@@ -182,7 +182,9 @@ int download_with_progress(const char* url, const char* filename, int show_progr
         }
 
         curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_CAINFO, "cacert.pem");
+        #ifdef _WIN32
+            curl_easy_setopt(curl, CURLOPT_CAINFO, "cacert.pem");
+        #endif
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
